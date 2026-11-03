@@ -70,6 +70,28 @@ import Testing
         #expect(artifacts(in: home, "web") == ["dist", "coverage", ".playwright-cli", "test-results", "playwright-report"])
     }
 
+    /// `xcodebuild -derivedDataPath build/DerivedData` puts DerivedData anywhere, under any name.
+    @Test func derivedDataFoundByWhatXcodePutsInIt() throws {
+        let home = try TestHome()
+        let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <plist version="1.0"><dict><key>WorkspacePath</key><string>/x/App.xcodeproj</string></dict></plist>
+            """
+        try home.file("app/ios/App.xcodeproj/project.pbxproj")
+        try home.file("app/ios/build/app-icons.png")                    // yours: build/ itself stays
+        for name in ["DerivedData", "DeviceData"] {
+            try home.file("app/ios/build/\(name)/info.plist", contents: plist)
+            try home.file("app/ios/build/\(name)/Build/Products/Debug-iphonesimulator/App.app/App")
+            try home.file("app/ios/build/\(name)/Logs/Build/LogStoreManifest.plist")
+        }
+        try home.file("app/notes/info.plist", contents: "<plist version=\"1.0\"><dict/></plist>")  // no workspace
+        try home.file("app/notes/Build/x")
+        try home.file("app/notes/Logs/x")
+        #expect(artifacts(in: home, "app") == ["ios/build/DerivedData", "ios/build/DeviceData"])
+        #expect(ProjectArtifacts.kind(of: home.path("app/ios/build/DeviceData")) == "DerivedData")
+        #expect(ProjectArtifacts.kind(of: home.path("app/notes")) == "notes")
+    }
+
     @Test func newMarkersFindProjects() throws {
         let home = try TestHome()
         try home.file("code/restaurant/App.sln")

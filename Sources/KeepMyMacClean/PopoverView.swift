@@ -459,6 +459,7 @@ private struct ItemRow: View {
                 costLine
                 suggestionLine
                 projectLine
+                worktreeLine
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 3) {
@@ -538,6 +539,25 @@ private struct ItemRow: View {
             }
             .font(.caption)
             .foregroundStyle(blurb.isGenerated ? Palette.purple : Palette.secondaryText)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .labelStyle(CompactLabelStyle())
+        }
+    }
+
+    /// On worktree rows: the repository, the branch unless it's the title, and the app that made it.
+    @ViewBuilder
+    private var worktreeLine: some View {
+        if let worktree = item.worktree {
+            let at = worktree.branch ?? "detached at \(worktree.head.prefix(7))"
+            let parts = [worktree.repositoryName, at == item.title ? nil : at, worktree.tool].compactMap { $0 }
+            Label {
+                Text(parts.joined(separator: " · "))
+            } icon: {
+                Image(systemName: "arrow.triangle.branch")
+            }
+            .font(.caption)
+            .foregroundStyle(Palette.secondaryText)
             .lineLimit(1)
             .truncationMode(.tail)
             .labelStyle(CompactLabelStyle())
@@ -713,6 +733,16 @@ private struct ActionTargets: View {
                 if !item.skipped.isEmpty {
                     skippedList
                 }
+            case .removeWorktree(_, let worktree, _):
+                if let base = item.worktree?.base {
+                    Label("Merged into \(base), nothing uncommitted", systemImage: "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(Palette.green)
+                }
+                paths([worktree])
+                Text("With git worktree remove, which stops if anything in it changed. The branch stays.")
+                    .font(.caption)
+                    .foregroundStyle(Palette.secondaryText)
             case .command(let executable, let arguments):
                 Text(([URL(fileURLWithPath: executable).lastPathComponent] + arguments).joined(separator: " "))
                     .font(.system(.caption, design: .monospaced))
@@ -725,13 +755,14 @@ private struct ActionTargets: View {
         switch item.action {
         case .removePaths(let urls): urls.count == 1 ? "Deletes this folder" : "Deletes these \(urls.count) folders"
         case .moveToTrash: "Moves to the Trash"
+        case .removeWorktree: "Removes this worktree"
         case .command: "Runs"
         }
     }
 
     private var symbol: String {
         switch item.action {
-        case .removePaths: "trash"
+        case .removePaths, .removeWorktree: "trash"
         case .moveToTrash: "arrow.up.trash"
         case .command: "terminal"
         }
@@ -795,9 +826,9 @@ private struct ActionTargets: View {
         }
     }
 
-    /// Inside a project, paths are relative to it ("app/build"); otherwise "~/…".
+    /// Inside a project or worktree, paths are relative to it ("app/build"); otherwise "~/…".
     private func display(_ url: URL) -> String {
-        if item.project != nil, let base = item.revealURL?.standardizedFileURL.path {
+        if item.project != nil || item.worktree != nil, let base = item.revealURL?.standardizedFileURL.path {
             let path = url.standardizedFileURL.path
             if path.hasPrefix(base + "/") { return String(path.dropFirst(base.count + 1)) + "/" }
         }
@@ -911,6 +942,7 @@ private struct FooterBar: View {
         let toDelete = selected.filter { !$0.action.movesToTrash }
         let deleteSize = toDelete.reduce(Int64(0)) { $0 + $1.size }
         let trashSize = toTrash.reduce(Int64(0)) { $0 + $1.size }
+        let worktrees = toDelete.filter(\.action.removesWorktree)
         let reviewCount = selected.filter { $0.safety == .review }.count
         let dataLoss = selected.filter { $0.costLevel == .dataLoss }
 
@@ -923,8 +955,16 @@ private struct FooterBar: View {
                     Text(headline(deleteCount: toDelete.count, deleteSize: deleteSize, trashCount: toTrash.count, trashSize: trashSize))
                         .font(.system(size: 13, weight: .semibold))
                         .fixedSize(horizontal: false, vertical: true)
-                    if !toDelete.isEmpty {
+                    if toDelete.count > worktrees.count {
                         Text("Deleted permanently, not moved to the Trash. Build tools recreate them when needed.")
+                            .font(.caption)
+                            .foregroundStyle(Palette.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !worktrees.isEmpty {
+                        Text(worktrees.count == 1
+                             ? "The worktree is removed with git worktree remove, which stops if it changed. Its branch stays."
+                             : "Worktrees are removed with git worktree remove, which stops if one changed. Their branches stay.")
                             .font(.caption)
                             .foregroundStyle(Palette.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)

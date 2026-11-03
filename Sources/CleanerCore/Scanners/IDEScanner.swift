@@ -1,7 +1,7 @@
 import Foundation
 
-/// Leftover settings and caches of IDE versions you no longer run (Android Studio, IntelliJ...),
-/// plus JetBrains Toolbox and VS Code caches.
+/// Leftover settings and caches of IDE versions you no longer run (Android Studio, IntelliJ...), the indexes and
+/// caches of the versions you use, plus JetBrains Toolbox and VS Code caches.
 public struct IDEScanner: CleanupScanner {
     public let categoryID = "ides"
     public let title = "IDEs"
@@ -22,6 +22,16 @@ public struct IDEScanner: CleanupScanner {
         "DataGrip": "DataGrip", "RubyMine": "RubyMine", "PhpStorm": "PhpStorm", "AppCode": "AppCode",
         "Fleet": "Fleet",
     ]
+
+    /// Folders in an IDE's cache folder that it rebuilds on its own. Local history (LocalHistory) isn't one.
+    static let rebuiltCacheFolders = ["caches", "index", "vcs-log", "compile-server", "tmp", "jcef_cache"]
+
+    /// What to quit before cleaning an IDE's caches.
+    static func blocker(for version: IDEDataFolder) -> Blocker {
+        if version.product.hasPrefix("AndroidStudio") { return .androidStudio }
+        let app = productNames[version.product] ?? version.product
+        return Blocker(name: app, processPattern: "\(app).app/Contents/MacOS")
+    }
 
     public struct IDEDataFolder: Sendable, Hashable {
         public var product: String
@@ -109,6 +119,25 @@ public struct IDEScanner: CleanupScanner {
                 afterCleaning: "Your current version keeps working with its own settings.",
                 lastUsed: urls.compactMap(FileInfo.modificationDate).max()
             ) }
+        }
+
+        // The versions you use rebuild their indexes and caches; their settings and local history stay.
+        for (version, urls) in foldersByVersion where old[version] == nil {
+            guard let caches = urls.first(where: { $0.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Caches" })
+            else { continue }
+            probes.append(.one { CleanupItem.folders(
+                id: "ide.caches:\(version.name)",
+                title: "\(version.displayName) caches",
+                detail: "Indexes and caches of the version you use",
+                urls: Self.rebuiltCacheFolders.map { caches.appendingPathComponent($0) },
+                safety: .safe,
+                reason: "Indexes and caches \(version.displayName) rebuilds on its own. Its settings and local history stay.",
+                cost: "Each project is indexed again the next time you open it",
+                costLevel: .rebuild,
+                afterCleaning: "\(version.displayName) rebuilds them as you open projects.",
+                revealURL: caches,
+                blockers: [Self.blocker(for: version)]
+            ) })
         }
 
         probes.append(.one { CleanupItem.folders(

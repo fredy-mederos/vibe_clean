@@ -1,7 +1,7 @@
 import Foundation
 
 /// Last line of defence before anything is deleted: only paths deep inside the home folder,
-/// and never the well-known folders themselves.
+/// and never the well-known folders themselves. When cleaning is given your own temp folder, what's inside it too.
 public enum PathGuard {
     public enum Violation: Error, LocalizedError, Equatable {
         case outsideHome(String)
@@ -25,13 +25,25 @@ public enum PathGuard {
         "Documents/projects", ".gradle/caches", ".gradle/wrapper", ".android/avd",
     ]
 
-    public static func validate(_ url: URL, home: URL) throws {
+    public static func validate(_ url: URL, home: URL, temporaryDirectory: URL? = nil) throws {
+        if let temporaryDirectory, isInside(url, temporaryDirectory) { return }
         let path = url.standardizedFileURL.path
         let homePath = home.standardizedFileURL.path
         guard path.hasPrefix(homePath + "/") else { throw Violation.outsideHome(path) }
         let relative = String(path.dropFirst(homePath.count + 1))
         guard relative.split(separator: "/").count >= 2 else { throw Violation.tooShallow(path) }
         guard !protectedRelativePaths.contains(relative) else { throw Violation.protected(path) }
+    }
+
+    /// Whether `url` is inside `folder`, not the folder itself. Compares real paths (/var is a link to
+    /// /private/var) but resolves only the parent, so a link inside is removed rather than followed.
+    static func isInside(_ url: URL, _ folder: URL) -> Bool {
+        let item = url.standardizedFileURL
+        guard !["", "/", ".", ".."].contains(item.lastPathComponent),
+              let parent = FileInfo.realPath(item.deletingLastPathComponent()),
+              let root = FileInfo.realPath(folder), root != "/"
+        else { return false }
+        return parent == root || parent.hasPrefix(root + "/")
     }
 }
 
@@ -43,14 +55,18 @@ public struct CleanupOutcome: Sendable {
 
 public struct Cleaner: Sendable {
     public var home: URL
+    /// Your own temp folder, whose contents may be removed too. Nil allows only paths in home.
+    public var temporaryDirectory: URL?
     /// How files are moved to the Trash. Replaced in tests so they never touch the real Trash.
     public var trash: @Sendable (URL) throws -> Void
 
     public init(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        temporaryDirectory: URL? = nil,
         trash: @escaping @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
     ) {
         self.home = home
+        self.temporaryDirectory = temporaryDirectory
         self.trash = trash
     }
 
@@ -60,7 +76,7 @@ public struct Cleaner: Sendable {
             switch item.action {
             case .removePaths(let urls):
                 // Validate everything first so an item is never half-deleted because of a bad path.
-                for url in urls { try PathGuard.validate(url, home: home) }
+                for url in urls { try PathGuard.validate(url, home: home, temporaryDirectory: temporaryDirectory) }
                 var failures: [String] = []
                 for url in urls where FileInfo.exists(url) || isSymlink(url) {
                     do {
@@ -84,6 +100,11 @@ public struct Cleaner: Sendable {
                 }
                 if !failures.isEmpty {
                     return CleanupOutcome(item: item, error: "Couldn't move \(failures.joined(separator: ", ")) to the Trash.")
+                }
+            case .removeWorktree(let gitDir, let worktree, let head):
+                try PathGuard.validate(worktree, home: home)
+                if let error = GitWorktrees.remove(worktree, gitDir: gitDir, head: head) {
+                    return CleanupOutcome(item: item, error: error)
                 }
             case .command(let executable, let arguments):
                 let output = try CommandRunner.run(executable, arguments, timeout: 600)

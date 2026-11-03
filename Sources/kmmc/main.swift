@@ -38,7 +38,8 @@ case "scan":
     let context = ScanContext(
         home: home,
         projectLocations: locations(),
-        largeFileMinimumSize: SettingsStore().load().largeFileThresholdBytes
+        largeFileMinimumSize: SettingsStore().load().largeFileThresholdBytes,
+        temporaryDirectory: TemporaryFolder.user
     )
     print("Project locations: \(context.projectLocations.map { PathFormat.abbreviated($0) }.joined(separator: ", "))\n")
     let start = Date()
@@ -104,6 +105,44 @@ case "projects":
         if arguments.contains("--prompts") { print("<<<\n\(profile.prompt)\n>>>") }
     }
 
+case "worktrees":
+    // Every linked worktree, whether everything in it is merged, and what the app offers for it.
+    // `kmmc worktrees <text>` only checks worktrees whose path contains the text.
+    let scanner = WorktreesScanner()
+    let openFiles = OpenFiles.current()
+    let filter = arguments.dropFirst().first
+    let entries = GitWorktrees.find(in: ProjectDiscovery.projects(inLocations: locations()), home: home)
+        .filter { entry in filter.map { entry.path.path.contains($0) } ?? true }
+    for (gitDir, group) in Dictionary(grouping: entries, by: \.gitDir).sorted(by: { $0.key.path < $1.key.path }) {
+        print("== \(PathFormat.abbreviated(gitDir)) (\(group.count == 1 ? "1 worktree" : "\(group.count) worktrees"))")
+        for entry in group.sorted(by: { $0.path.path < $1.path.path }) {
+            guard (try? PathGuard.validate(entry.path, home: home)) != nil else {
+                print("   \(PathFormat.abbreviated(entry.path)): outside your home folder, not offered")
+                continue
+            }
+            let start = Date()
+            guard let info = GitWorktrees.inspect(entry) else {
+                print("   \(PathFormat.abbreviated(entry.path)): git couldn't read it")
+                continue
+            }
+            let state = info.isMerged ? "merged into \(info.base ?? "?") (\(info.merge.map { "\($0)" } ?? ""))" : "kept: \(info.keptSummary)"
+            let openBy = openFiles?.processes(using: entry.path) ?? []
+            let offer = scanner.item(for: info, openBy: openBy).map { item in
+                let what = item.action.removesWorktree ? "remove worktree" : "build folders"
+                return "\(what) \(ByteFormat.standard(item.size))\(item.safety == .review ? " [review]" : "")"
+            } ?? "nothing to clean"
+            print("   \(info.name)  \(state)  → \(offer)")
+            print("      \(PathFormat.abbreviated(entry.path))  (checked in \(String(format: "%.1f", Date().timeIntervalSince(start)))s)")
+            if !openBy.isEmpty { print("      open in \(openBy.joined(separator: ", "))") }
+            if let own = info.ownIgnoredFiles, !own.isEmpty {
+                print("      \(own.count) ignored files only it has: \(own.prefix(3).joined(separator: ", "))\(own.count > 3 ? ", …" : "")")
+            } else if info.isMerged, info.ownIgnoredFiles == nil {
+                print("      ignored files couldn't be compared with the main checkout")
+            }
+        }
+        print()
+    }
+
 case "digest":
     // The weekly summary as the app computes it. --sample uses a made-up week, for when history is short.
     let history: SpaceHistory
@@ -112,7 +151,10 @@ case "digest":
         (history, categories) = sampleWeek()
     } else {
         history = HistoryStore().load()
-        let context = ScanContext(home: home, projectLocations: locations(), largeFileMinimumSize: SettingsStore().load().largeFileThresholdBytes)
+        let context = ScanContext(
+            home: home, projectLocations: locations(), largeFileMinimumSize: SettingsStore().load().largeFileThresholdBytes,
+            temporaryDirectory: TemporaryFolder.user
+        )
         for await snapshot in ScanEngine.run(context: context) { categories = snapshot.categories }
     }
     let now = arguments.contains("--sample") ? history.samples.last?.date ?? Date() : Date()
@@ -128,7 +170,7 @@ case "digest":
     }
 
 default:
-    print("usage: kmmc [scan|disk|discover|history|projects|digest [--sample]]")
+    print("usage: kmmc [scan|disk|discover|history|projects|worktrees [text]|digest [--sample]]")
 }
 
 /// A made-up week: losing ~1.3 GB a day, one 20 GB cleanup, Xcode build data and downloads growing.

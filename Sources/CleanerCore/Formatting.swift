@@ -19,12 +19,15 @@ public enum ByteFormat {
 }
 
 public enum PathFormat {
-    /// "/Users/me/Documents/x" → "~/Documents/x".
+    /// "/Users/me/Documents/x" → "~/Documents/x", and "/var/folders/…/T/x" → "$TMPDIR/x".
     public static func abbreviated(_ url: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> String {
         let path = url.standardizedFileURL.path
         let homePath = home.standardizedFileURL.path
         if path == homePath { return "~" }
         if path.hasPrefix(homePath + "/") { return "~" + path.dropFirst(homePath.count) }
+        if let temp = TemporaryFolder.userPaths.first(where: { path.hasPrefix($0 + "/") }) {
+            return "$TMPDIR" + path.dropFirst(temp.count)
+        }
         return path
     }
 }

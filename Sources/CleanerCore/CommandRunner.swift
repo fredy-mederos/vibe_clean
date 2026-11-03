@@ -30,10 +30,12 @@ public enum CommandRunner {
 
         try process.run()
 
-        // Drain stderr concurrently so a chatty command can't fill the pipe and deadlock.
+        // Drain stderr concurrently so a chatty command can't fill the pipe and deadlock. The reader and the timer
+        // get queues of their own: work sent to a global queue may never start while callers block every thread
+        // of the shared pool waiting on commands (as parallel tests do), and private serial queues always get one.
         let stderrData = DataBox()
         let stderrDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        DispatchQueue(label: "CommandRunner.stderr").async {
             stderrData.data = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             stderrDone.signal()
         }
@@ -45,7 +47,7 @@ public enum CommandRunner {
                 process.terminate()
             }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+        DispatchQueue(label: "CommandRunner.timeout").asyncAfter(deadline: .now() + timeout, execute: timer)
 
         let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

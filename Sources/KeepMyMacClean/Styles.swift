@@ -39,11 +39,15 @@ extension CleanupCategory {
     var tint: Color {
         switch id {
         case "projects": .blue
+        case "worktrees": .orange
         case "xcode": .indigo
         case "android": .green
         case "packages": .brown
         case "ides": .purple
         case "docker": .cyan
+        case "browsers": .pink
+        case "ai": .mint
+        case "temp": .red
         case "files": .teal
         default: .gray
         }

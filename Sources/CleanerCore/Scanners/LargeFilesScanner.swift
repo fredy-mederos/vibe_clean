@@ -1,14 +1,22 @@
 import CoreServices
 import Foundation
 
-/// Your own big files and forgotten downloads, with a suggestion for each.
+/// Your own big files, folders of videos that add up, and forgotten downloads, with a suggestion for each.
 /// These are never deleted: cleaning moves them to the Trash.
 public struct LargeFilesScanner: CleanupScanner {
     public let categoryID = "files"
     public let title = "Large files and downloads"
     public let symbol = "doc.on.doc"
 
-    public init() {}
+    /// Videos under the large-file size count towards a folder of videos from this size.
+    let mediumVideoSize: Int64
+    /// A folder whose videos under the large-file size add up to this is listed as one item.
+    let videoFolderSize: Int64
+
+    public init(mediumVideoSize: Int64 = 10_000_000, videoFolderSize: Int64 = 1_000_000_000) {
+        self.mediumVideoSize = mediumVideoSize
+        self.videoFolderSize = videoFolderSize
+    }
 
     public func probes(in context: ScanContext) -> [ItemProbe] {
         [
@@ -91,20 +99,29 @@ public struct LargeFilesScanner: CleanupScanner {
         "bundle", "framework", "xcframework", "dSYM", "logicx", "fcpbundle", "imovielibrary",
     ]
 
-    /// Files of at least `minimumSize` under `roots`. Hidden folders, skipped names and bundles aren't entered.
+    /// What the search finds: big files, and smaller videos by the folder they're in.
+    struct Found {
+        var files: [(url: URL, size: Int64)] = []
+        var videosByFolder: [URL: [(url: URL, size: Int64)]] = [:]
+    }
+
+    /// Files of at least `minimumSize` under `roots`, and videos of at least `mediumVideoSize` that are smaller.
+    /// Hidden folders, skipped names and bundles aren't entered.
     /// - Parameter skipFilesDirectlyIn: folders whose top-level files are reported by another probe.
-    static func findLargeFiles(in roots: [URL], minimumSize: Int64, skipFilesDirectlyIn: Set<String> = []) -> [(url: URL, size: Int64)] {
+    static func findLargeFiles(
+        in roots: [URL], minimumSize: Int64, mediumVideoSize: Int64 = .max, skipFilesDirectlyIn: Set<String> = []
+    ) -> Found {
         let paths = roots.map(\.path).filter { FileManager.default.fileExists(atPath: $0) }
-        guard !paths.isEmpty else { return [] }
+        guard !paths.isEmpty else { return Found() }
         var cPaths: [UnsafeMutablePointer<CChar>?] = paths.map { strdup($0) }
         cPaths.append(nil)
         defer { cPaths.forEach { free($0) } }
-        guard let fts = fts_open(&cPaths, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, nil) else { return [] }
+        guard let fts = fts_open(&cPaths, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, nil) else { return Found() }
         defer { fts_close(fts) }
 
         // Compare resolved paths: /var and /private/var are the same folder, for example.
         let skippedParents = Set(skipFilesDirectlyIn.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
-        var found: [(URL, Int64)] = []
+        var found = Found()
         while let entry = fts_read(fts) {
             let info = Int32(entry.pointee.fts_info)
             let path = String(cString: entry.pointee.fts_path)
@@ -122,10 +139,16 @@ public struct LargeFilesScanner: CleanupScanner {
                 }
             case FTS_F:
                 guard let stat = entry.pointee.fts_statp?.pointee else { continue }
-                let size = Int64(stat.st_blocks) * 512
-                guard size >= minimumSize, !url.lastPathComponent.hasPrefix(".") else { continue }
+                let blocks = Int64(stat.st_blocks) * 512
+                guard blocks >= min(minimumSize, mediumVideoSize), !url.lastPathComponent.hasPrefix(".") else { continue }
                 if skippedParents.contains(url.deletingLastPathComponent().resolvingSymlinksInPath().path) { continue }
-                found.append((url, size))
+                // Trashing a file whose data an APFS clone shares frees nothing.
+                let size = DirectorySize.reclaimableBytes(ofFile: entry.pointee.fts_path, blocks: blocks)
+                if size >= minimumSize {
+                    found.files.append((url, size))
+                } else if size >= mediumVideoSize, FileKind.of(url) == .video {
+                    found.videosByFolder[url.deletingLastPathComponent(), default: []].append((url, size))
+                }
             default:
                 continue
             }
@@ -140,8 +163,11 @@ public struct LargeFilesScanner: CleanupScanner {
                 && !ProjectDiscovery.isToolchain($0)
         }
         let downloads = context.path("Downloads").standardizedFileURL.path
-        return Self.findLargeFiles(in: roots, minimumSize: context.largeFileMinimumSize, skipFilesDirectlyIn: [downloads])
-            .map { file in
+        let found = Self.findLargeFiles(
+            in: roots, minimumSize: context.largeFileMinimumSize, mediumVideoSize: mediumVideoSize, skipFilesDirectlyIn: [downloads]
+        )
+        return found.videosByFolder.compactMap { videoFolderItem($0.key, videos: $0.value, context: context) }
+            + found.files.map { file in
                 let kind = FileKind.of(file.url)
                 let opened = FileDates.lastOpened(file.url)
                 return CleanupItem(
@@ -159,6 +185,29 @@ public struct LargeFilesScanner: CleanupScanner {
                     dateKind: opened == nil ? .modified : .opened
                 )
             }
+    }
+
+    /// Videos that are each under the large-file size but add up, like a folder of screen recordings. Folders in a
+    /// git checkout are left out: their videos are a project's assets.
+    func videoFolderItem(_ folder: URL, videos: [(url: URL, size: Int64)], context: ScanContext) -> CleanupItem? {
+        let size = videos.reduce(0) { $0 + $1.size }
+        guard size >= videoFolderSize, GitWorktrees.dotGit(containing: folder, home: context.home) == nil else { return nil }
+        let urls = videos.map(\.url).sorted { $0.path < $1.path }
+        return CleanupItem(
+            id: "videos:\(folder.path)",
+            title: "\(videos.count) videos in \(folder.lastPathComponent)",
+            detail: "Videos · \(PathFormat.abbreviated(folder, home: context.home))",
+            size: size,
+            safety: .personal,
+            action: .moveToTrash(urls),
+            reason: "Videos under \(ByteFormat.short(context.largeFileMinimumSize)) each that add up to "
+                + "\(ByteFormat.short(size)). Consider moving them to an external drive or cloud storage.",
+            cost: Self.trashCost,
+            afterCleaning: Self.trashAfterCleaning,
+            revealURL: folder,
+            lastUsed: urls.compactMap(FileInfo.modificationDate).max(),
+            dateKind: .modified
+        )
     }
 
     // MARK: Downloads
@@ -192,7 +241,7 @@ public struct LargeFilesScanner: CleanupScanner {
             // Plain folders are left to the large-file search so items never overlap.
             if values.isDirectory == true, values.isPackage != true { return nil }
             let kind = FileKind.of(url)
-            let size = DirectorySize.allocatedSize(of: url)
+            let size = DirectorySize.reclaimableSize(of: url)
             let added = values.addedToDirectoryDate
             guard Self.shouldList(kind: kind, size: size, added: added, largeFileMinimumSize: context.largeFileMinimumSize) else {
                 return nil

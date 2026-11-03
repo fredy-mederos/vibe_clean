@@ -37,7 +37,7 @@ import Testing
         let home = try TestHome()
         try home.file("a/one.bin", bytes: 100_000)
         try home.file("a/b/two.bin", bytes: 200_000)
-        let size = DirectorySize.allocatedSize(of: home.path("a"))
+        let size = DirectorySize.reclaimableSize(of: home.path("a"))
         #expect(size >= 300_000)
         #expect(size < 400_000)
     }
@@ -46,12 +46,29 @@ import Testing
         let home = try TestHome()
         let original = try home.file("a/one.bin", bytes: 500_000)
         try FileManager.default.linkItem(at: original, to: home.path("a/link.bin"))
-        let size = DirectorySize.allocatedSize(of: home.path("a"))
+        let size = DirectorySize.reclaimableSize(of: home.path("a"))
         #expect(size < 600_000)
     }
 
     @Test func missingPathIsZero() {
-        #expect(DirectorySize.allocatedSize(of: URL(fileURLWithPath: "/nope/\(UUID())")) == 0)
+        #expect(DirectorySize.reclaimableSize(of: URL(fileURLWithPath: "/nope/\(UUID())")) == 0)
+    }
+
+    /// A worktree's copy of a video cloned from the main checkout frees nothing; clones deleted together count once.
+    @Test func countsAPFSClonesByWhatDeletingFrees() throws {
+        let home = try TestHome()
+        let original = try home.file("main/video.mp4", bytes: 2_000_000)
+        for copy in ["worktree/video.mp4", "both/a.mp4", "both/b.mp4"] {
+            let target = home.path(copy)
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try #require(clonefile(original.path, target.path, 0) == 0)
+        }
+
+        #expect(DirectorySize.reclaimableSize(of: home.path("worktree")) < 100_000)
+        // The original is still in main, so its two clones in both/ free nothing either.
+        #expect(DirectorySize.reclaimableSize(of: home.path("both")) < 100_000)
+        let all = DirectorySize.reclaimableSize(of: [home.path("main"), home.path("worktree"), home.path("both")])
+        #expect(all >= 2_000_000 && all < 2_500_000)
     }
 }
 
@@ -313,5 +330,21 @@ import Testing
         let old = SettingsStore(fileURL: home.path("old.json")).load()
         #expect(old.projectLocations == ["/x"])
         #expect(old.lowSpaceThresholdGB == 20)
+    }
+}
+
+@Suite struct CommandRunnerTests {
+    /// More commands at once than there are threads in the shared pool, each blocking its thread, as when many
+    /// tests run git in parallel. Reading stderr on a global queue hung here: no thread was left to run it.
+    @Test func finishesWhenEveryThreadIsWaitingOnACommand() async throws {
+        let count = ProcessInfo.processInfo.activeProcessorCount * 2
+        let outputs = try await withThrowingTaskGroup(of: CommandRunner.Output.self) { group in
+            for _ in 0..<count {
+                group.addTask { try CommandRunner.run("/bin/sh", ["-c", "echo out; echo err >&2"]) }
+            }
+            return try await group.reduce(into: []) { $0.append($1) }
+        }
+        #expect(outputs.count == count)
+        #expect(outputs.allSatisfy { $0.stdout == "out\n" && $0.stderr == "err\n" })
     }
 }

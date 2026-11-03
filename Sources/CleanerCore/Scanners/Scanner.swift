@@ -11,19 +11,23 @@ public struct ScanContext: Sendable {
     public var largeFileMinimumSize: Int64
     /// Projects inside `projectLocations`. Found once per scan by the engine and shared by scanners.
     public var projects: [URL]?
+    /// Your own temp folder (`TemporaryFolder.user`), searched for leftovers. Nil skips it, as in tests.
+    public var temporaryDirectory: URL?
 
     public init(
         home: URL,
         projectLocations: [URL],
         applicationFolders: [URL]? = nil,
         runsSystemCommands: Bool = true,
-        largeFileMinimumSize: Int64 = 500_000_000
+        largeFileMinimumSize: Int64 = 500_000_000,
+        temporaryDirectory: URL? = nil
     ) {
         self.home = home
         self.projectLocations = projectLocations
         self.applicationFolders = applicationFolders ?? [URL(fileURLWithPath: "/Applications"), home.appendingPathComponent("Applications")]
         self.runsSystemCommands = runsSystemCommands
         self.largeFileMinimumSize = largeFileMinimumSize
+        self.temporaryDirectory = temporaryDirectory
     }
 
     func path(_ relative: String) -> URL {
@@ -75,11 +79,15 @@ public struct ScanSnapshot: Sendable {
 public enum ScanEngine {
     public static let scanners: [any CleanupScanner] = [
         ProjectsScanner(),
+        WorktreesScanner(),
         XcodeScanner(),
         AndroidScanner(),
         PackageCachesScanner(),
         IDEScanner(),
+        BrowserCachesScanner(),
+        AIToolsScanner(),
         DockerScanner(),
+        TempFilesScanner(),
         LargeFilesScanner(),
     ]
 
@@ -114,7 +122,7 @@ public enum ScanEngine {
                     for await entry in group { result.append(entry) }
                     return result
                 }
-                let work = listed.flatMap { index, probes in probes.map { (index, $0) } }
+                let work = interleaved(listed)
 
                 // 2. Measure with bounded parallelism, publishing after each result.
                 var itemsByScanner = Array(repeating: [CleanupItem](), count: scanners.count)
@@ -147,6 +155,16 @@ public enum ScanEngine {
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Each scanner's first probe, then each one's second, and so on, in scanner order. So every category shows
+    /// its first items early instead of waiting behind a scanner with a hundred probes (one per git worktree).
+    static func interleaved<Probe>(_ listed: [(Int, [Probe])]) -> [(Int, Probe)] {
+        let lists = listed.sorted { $0.0 < $1.0 }
+        let longest = lists.map(\.1.count).max() ?? 0
+        return (0..<longest).flatMap { depth in
+            lists.compactMap { index, probes in depth < probes.count ? (index, probes[depth]) : nil }
         }
     }
 
@@ -184,7 +202,7 @@ extension CleanupItem {
     ) -> CleanupItem? {
         let existing = urls.filter(FileInfo.exists)
         guard !existing.isEmpty else { return nil }
-        let size = DirectorySize.allocatedSize(of: existing)
+        let size = DirectorySize.reclaimableSize(of: existing)
         let fill = { (text: String?) in
             text?.replacingOccurrences(of: sizePlaceholder, with: "~\(ByteFormat.short(size))")
         }

@@ -118,6 +118,10 @@ public enum ProjectArtifacts {
             let (dir, depth) = queue[index]
             index += 1
             let siblings = Set(FileInfo.childNames(of: dir))
+            if depth > 0, isDerivedData(dir, children: siblings) {
+                artifacts.append(dir)
+                continue
+            }
             for child in FileInfo.subdirectories(of: dir) {
                 let name = child.lastPathComponent
                 if let candidates = rulesByName[name], candidates.contains(where: { $0.matches(child, siblings) }) {
@@ -131,6 +135,23 @@ public enum ProjectArtifacts {
             }
         }
         return artifacts
+    }
+
+    /// A DerivedData folder Xcode was told to put somewhere else (`xcodebuild -derivedDataPath build/DerivedData`),
+    /// under any name. Recognized by what Xcode puts in it: an info.plist naming the workspace, Build, and its
+    /// logs or caches.
+    static func isDerivedData(_ folder: URL, children: Set<String>? = nil) -> Bool {
+        let children = children ?? Set(FileInfo.childNames(of: folder))
+        guard children.contains("info.plist"), children.contains("Build"),
+              !children.isDisjoint(with: ["Logs", "Index.noindex", "ModuleCache.noindex"])
+        else { return false }
+        return FileInfo.plist(at: folder.appendingPathComponent("info.plist"))?["WorkspacePath"] is String
+    }
+
+    /// What an artifact folder is: its name, or DerivedData for one found by what's in it.
+    public static func kind(of artifact: URL) -> String {
+        let name = artifact.lastPathComponent
+        return rulesByName[name] == nil && isDerivedData(artifact) ? "DerivedData" : name
     }
 
     /// How an artifact folder is shown in the list. Unity's generic names get a prefix so

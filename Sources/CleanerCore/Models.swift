@@ -18,9 +18,17 @@ public enum CleanupAction: Sendable, Hashable {
     case command(executable: String, arguments: [String])
     /// Move to the Trash so you can still change your mind. Used for your own files.
     case moveToTrash([URL])
+    /// Remove a linked git worktree with `git worktree remove`, if it's still on the commit that was scanned.
+    /// Git refuses when files changed since; the branch stays. `gitDir` is the repository's shared git folder.
+    case removeWorktree(gitDir: URL, worktree: URL, head: String)
 
     public var movesToTrash: Bool {
         if case .moveToTrash = self { return true }
+        return false
+    }
+
+    public var removesWorktree: Bool {
+        if case .removeWorktree = self { return true }
         return false
     }
 }
@@ -81,6 +89,9 @@ public struct Blocker: Sendable, Hashable {
     public static let gradleDaemon = Blocker(name: "Gradle daemon", processPattern: "GradleDaemon")
     public static let androidEmulator = Blocker(name: "Android Emulator", processPattern: "qemu-system")
     public static let vsCode = Blocker(name: "VS Code", bundleIDs: ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders"])
+    public static let instruments = Blocker(name: "Instruments", bundleIDs: ["com.apple.dt.Instruments"], processPattern: "xctrace")
+    /// A render in progress: Remotion's headless browser and compositor run from folders named remotion.
+    public static let remotion = Blocker(name: "Remotion renders", processPattern: "remotion")
 }
 
 public struct CleanupItem: Identifiable, Sendable, Hashable {
@@ -107,6 +118,8 @@ public struct CleanupItem: Identifiable, Sendable, Hashable {
     public var dateKind: DateKind
     /// For project build folders: what the project is and how active it is.
     public var project: ProjectProfile?
+    /// For git worktrees: its repository, branch, and whether everything in it is merged.
+    public var worktree: WorktreeInfo?
     /// Every folder in the action was confirmed ignored by git, with nothing tracked inside.
     public var checkedWithGit: Bool
     /// Folders that matched a rule but were left out, and why (for example "not ignored by git").
@@ -128,6 +141,7 @@ public struct CleanupItem: Identifiable, Sendable, Hashable {
         lastUsed: Date? = nil,
         dateKind: DateKind = .used,
         project: ProjectProfile? = nil,
+        worktree: WorktreeInfo? = nil,
         checkedWithGit: Bool = false,
         skipped: [SkippedFolder] = []
     ) {
@@ -146,6 +160,7 @@ public struct CleanupItem: Identifiable, Sendable, Hashable {
         self.lastUsed = lastUsed
         self.dateKind = dateKind
         self.project = project
+        self.worktree = worktree
         self.checkedWithGit = checkedWithGit
         self.skipped = skipped
     }

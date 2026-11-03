@@ -8,8 +8,8 @@
 
 A small menu bar app that shows how much disk space is left, how fast it's shrinking, and lets
 you pick developer junk to clean: Xcode DerivedData, Gradle caches, project `build/` and
-`node_modules/` folders, old simulator runtimes, old IDE versions, package manager caches, Docker
-data, plus your own large files and forgotten downloads.
+`node_modules/` folders, merged git worktrees, old simulator runtimes, old IDE versions, package manager
+caches, Docker data, plus your own large files and forgotten downloads.
 
 Cleaning is always manual: nothing is deleted until you select it and confirm.
 
@@ -42,6 +42,7 @@ swift run kmmc discover            # read-only: show where your projects were fo
 swift run kmmc history             # read-only: free-space samples and the current trend
 swift run kmmc digest [--sample]   # read-only: the weekly summary (needs 2 days of history; --sample fakes a week)
 swift run kmmc projects            # read-only: stack, description and git activity of each project
+swift run kmmc worktrees           # read-only: each git worktree, whether it's merged, and what's offered
 ```
 
 The app icon is drawn in code: `swift scripts/make-icon.swift` writes `Resources/AppIcon.icns` (and a 1024 px
@@ -82,12 +83,16 @@ access to Documents, Desktop and Downloads.
 
 | Kind | Meaning | Examples |
 |---|---|---|
-| Safe | The owning tool recreates it. Cost: a slower next build or a re-download. | DerivedData, project build folders, Gradle build cache, npm/pnpm caches, unavailable simulators |
-| Review | Probably not needed, but worth a look. | iOS DeviceSupport, simulator runtimes, old Android Studio versions, Gradle dependencies, CocoaPods specs repo, older SDK platforms, unused Docker images and volumes |
-| My files | Your own files. Only ever moved to the Trash, with a suggestion for each. | Installers, archives already extracted, APK/IPA builds, videos, VM disks, ML models, old downloads |
+| Safe | The owning tool recreates it. Cost: a slower next build or a re-download. | DerivedData, project build folders, merged git worktrees, Gradle build cache, npm/pnpm caches, unavailable simulators, Remotion bundles and other temp-folder leftovers, browser caches, the current IDE's indexes |
+| Review | Probably not needed, but worth a look. | iOS DeviceSupport, simulator runtimes, apps and data on a simulator, old Android Studio versions, Gradle dependencies, CocoaPods specs repo, older SDK platforms, unused Docker images and volumes, Codex and Claude Code conversations older than 30 days |
+| My files | Your own files. Only ever moved to the Trash, with a suggestion for each. | Installers, archives already extracted, APK/IPA builds, videos, folders of smaller videos that add up (screen recordings), VM disks, ML models, old downloads |
 
 Caches are deleted permanently (moving gigabytes of caches to the Trash frees nothing); your own files
 go to the Trash.
+
+Sizes are what deleting frees, not what `du` adds up: data a file shares with an APFS clone outside the item
+doesn't count, so a worktree's copy of a video cloned from the main checkout shows as ~0, and files cloned
+within an item count once.
 
 Every item says why it's listed, what cleaning costs and what happens afterwards (the ⓘ button). Review
 rows show the cost inline, colored by level:
@@ -103,21 +108,67 @@ Facts come from your projects where cheap: which Gradle version each project's w
 they compile against, which Podfiles still use the git CocoaPods specs, how many simulators use a runtime.
 
 Where a tool has its own cleanup command, the app uses it (`xcrun simctl delete unavailable`,
-`xcrun simctl runtime delete`). Every path passes `PathGuard` before deletion: it must be at least two levels
-inside your home folder and never one of the well-known folders.
+`xcrun simctl runtime delete`, `xcrun simctl erase`). Every path passes `PathGuard` before deletion: it must be
+at least two levels inside your home folder and never one of the well-known folders. The one exception is what's
+inside your own temp folder (`/var/folders/…/T`, below).
 
 A project folder is only deleted when it passes two checks:
 
 1. **It's a known build folder** in the place its tool puts it: `build/` next to `build.gradle(.kts)` or
    `pubspec.yaml`, `node_modules/` next to `package.json`, `Pods/` next to `Podfile`, `vendor/bundle/` with a
    `Gemfile`, NuGet `packages/` next to a `.sln`, Flutter's `ios/Flutter/*.framework`, Elixir `_build/` and
-   `deps/`, `.venv/`, `dist/`, `.playwright-cli/` and so on (`ProjectArtifacts.rules`).
+   `deps/`, `.venv/`, `dist/`, `.playwright-cli/` and so on (`ProjectArtifacts.rules`). Xcode DerivedData
+   built with `xcodebuild -derivedDataPath` is found wherever it is and whatever it's called
+   (`ios/build/DerivedData`), by what Xcode puts in it: an `info.plist` naming the workspace, `Build/`, and
+   its logs or caches.
 2. **Git ignores it** (the folder, or every file in it) **and nothing inside is tracked** (`GitIgnoreCheck`).
 
 Git only ever removes folders from the list, never adds them, so gitignored app data (`data/`, `uploads/`,
-`captures/`, `.env`, worktrees) is never offered. Folders that fail the git check are kept and listed in the ⓘ
+`captures/`, `.env`) is never offered. Neither is a gitignored worktrees folder like `.claude/worktrees/`:
+worktrees have their own category, below. Folders that fail the git check are kept and listed in the ⓘ
 popover with the reason. Projects outside git can't be confirmed, so they're Review instead of Safe.
 The ⓘ popover lists every folder that will be deleted.
+
+## Git worktrees
+
+Claude Code, Codex, Cursor and Conductor make a git worktree per task: a full checkout with its own
+`node_modules/` and build outputs, so they add up fast. The app finds the worktrees of your repositories
+wherever they are (`.claude/worktrees/` inside the repository, sibling folders) and the ones those apps keep in
+their own folders (`~/.codex/worktrees`, `~/.cursor/worktrees`, `~/conductor/workspaces`, `~/.t3/worktrees`).
+
+A worktree is offered whole only when removing it loses nothing:
+
+1. **Everything committed in it is in the main branch** (origin's default branch, or `main`, `master`,
+   `develop` or `trunk`, local or on origin). `git branch --merged` only sees merges and fast-forwards, so
+   the content is compared too, which catches GitHub's rebase and squash merges. Any of these counts:
+   its commit is in main's history; main has the same version of every file it changed; every commit has a
+   twin in main with the same changes (patch ids without context lines, because after a rebase the lines
+   around a change often differ and `git cherry` misses it); or one commit in main has all its changes
+   together (a squash merge).
+2. **Nothing is uncommitted**: no modified, staged or untracked files. Ignored build outputs don't count.
+3. **It isn't locked** (`git worktree lock`) and has no submodules, which `git worktree remove` won't take.
+
+It's removed with `git worktree remove`, after checking it's still on the commit that was scanned; git itself
+refuses if any file changed since. The branch stays.
+
+A merged worktree is only Safe when nothing else is lost with it either. It's Review when:
+
+- **It has git-ignored files of its own**: renders, captures, screenshots attached to a PR. Ignored files in
+  build output, cache and editor folders (`build/`, `node_modules/`, `.idea/`, DerivedData...) don't count, and
+  neither do files the main checkout has too, byte for byte (apps copy `.env` and the like into new
+  worktrees; APFS clones are recognized without reading them). Nor do the `local.properties` Android Studio
+  writes with only the SDK's location, ignored lock files, or `.DS_Store`. The row says how many and the ⓘ
+  names the biggest.
+- **Something has it open right now**: a terminal, a Claude Code session, an editor, a running build (one
+  `lsof -n -P` pass over your processes, a fraction of a second). The `adb` server, which keeps the folder it
+  was started from until you restart, doesn't count.
+- **It was used in the last 2 days**, since a session or editor may still come back to it.
+
+`kmmc worktrees [text]` shows all of this per worktree, for the worktrees whose path contains `text`.
+
+Other worktrees stay. Their gitignored build folders are offered instead, with the same checks as a project,
+and the row says what keeps the worktree ("2 uncommitted changes, 1 commit not in main"). Project build
+folders skips linked worktrees, so nothing is listed twice.
 
 ## Smarter suggestions (optional)
 
@@ -149,6 +200,18 @@ prints it; `--sample` shows a made-up week.
 
 The summary is written by the app, not a language model: in testing, Apple's on-device model reworded it
 accurately but kept dropping the most useful details (which item grew, the pace, what you cleaned).
+
+## Temporary files
+
+Your temp folder (`$TMPDIR`, `/var/folders/…/T`) is where command-line tools work, and some never clean up.
+Remotion's `bundle()` copies the whole project, `public/` folder included, for every render; Instruments
+leaves raw recordings; Xcode leaves export folders. The app groups these by tool (Safe, with what to quit
+first) and lists any other temp file or folder of 100 MB or more that nothing changed for 3 days (Review).
+Leftovers changed in the last hour are left out, since a render may still be using them, and so is Apple's
+own (`com.apple.*`).
+
+To stop Remotion bundles piling up, delete the folder `bundle()` returns once the render is done and pass
+`symlinkPublicDir: true` so `public/` isn't copied each time.
 
 ## Layout
 

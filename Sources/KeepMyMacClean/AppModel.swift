@@ -194,7 +194,8 @@ final class AppModel {
         let context = ScanContext(
             home: home,
             projectLocations: projectLocations,
-            largeFileMinimumSize: settings.largeFileThresholdBytes
+            largeFileMinimumSize: settings.largeFileThresholdBytes,
+            temporaryDirectory: TemporaryFolder.user
         )
         for await snapshot in ScanEngine.run(context: context) {
             categories = snapshot.categories
@@ -331,7 +332,7 @@ final class AppModel {
     func clean() async {
         let items = selectedItems
         guard !items.isEmpty else { return }
-        let cleaner = Cleaner(home: home)
+        let cleaner = Cleaner(home: home, temporaryDirectory: TemporaryFolder.user)
         var errors: [String] = []
         var cleanedIDs = Set<String>()
         var freed: Int64 = 0
@@ -379,6 +380,8 @@ final class AppModel {
             switch item.action {
             case .removePaths(let urls), .moveToTrash(let urls):
                 if urls.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) { stillThere.append(item) }
+            case .removeWorktree(_, let worktree, _):
+                if FileManager.default.fileExists(atPath: worktree.path) { stillThere.append(item) }
             case .command:
                 commandItems.append(item)
             }
@@ -387,7 +390,10 @@ final class AppModel {
 
         let categoryIDs = Set(commandItems.compactMap { item in categories.first { $0.items.contains { $0.id == item.id } }?.id })
         let scanners = ScanEngine.scanners.filter { categoryIDs.contains($0.categoryID) }
-        let context = ScanContext(home: home, projectLocations: projectLocations, largeFileMinimumSize: settings.largeFileThresholdBytes)
+        let context = ScanContext(
+            home: home, projectLocations: projectLocations, largeFileMinimumSize: settings.largeFileThresholdBytes,
+            temporaryDirectory: TemporaryFolder.user
+        )
         var fresh: [CleanupItem] = []
         for await snapshot in ScanEngine.run(scanners, context: context) {
             fresh = snapshot.categories.flatMap(\.items)

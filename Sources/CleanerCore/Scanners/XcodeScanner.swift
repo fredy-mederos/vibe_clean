@@ -246,6 +246,7 @@ public struct XcodeScanner: CleanupScanner {
         if let item = Self.unavailableSimulatorsItem(devices, context: context) {
             items.append(item)
         }
+        items += devices.compactMap { Self.simulatorDataItem($0) }
 
         for runtime in SimulatorRuntime.load() where runtime.deletable {
             let users = devices.filter { $0.isAvailable && $0.runtimeIdentifier == runtime.runtimeIdentifier }.count
@@ -284,7 +285,7 @@ extension XcodeScanner {
             id: "xcode.simulators.unavailable",
             title: "Unavailable simulators",
             detail: "\(unavailable.count) simulators whose iOS version is no longer installed",
-            size: DirectorySize.allocatedSize(of: folders),
+            size: DirectorySize.reclaimableSize(of: folders),
             safety: .safe,
             action: .command(executable: "/usr/bin/xcrun", arguments: ["simctl", "delete"] + unavailable.map(\.udid)),
             reason: "Their iOS runtime is no longer installed, so they can't run.",
@@ -297,11 +298,52 @@ extension XcodeScanner {
     }
 }
 
+extension XcodeScanner {
+    /// A simulator's apps and their data are listed from this size.
+    static let simulatorDataMinimumSize: Int64 = 500_000_000
+
+    /// The apps installed on a simulator and everything they saved, erased with `xcrun simctl erase`. The simulator
+    /// stays. Not offered while it's running, when erasing fails.
+    static func simulatorDataItem(_ device: SimulatorDevice, minimumSize: Int64 = simulatorDataMinimumSize) -> CleanupItem? {
+        guard device.isAvailable, device.state != "Booted", let data = device.dataPath else { return nil }
+        let size = DirectorySize.reclaimableSize(of: data)
+        guard size >= minimumSize else { return nil }
+        return CleanupItem(
+            id: "xcode.simulator-data:\(device.udid)",
+            title: "\(device.name) simulator data",
+            detail: "Apps and their data · \(SimulatorDevice.runtimeName(device.runtimeIdentifier))",
+            size: size,
+            safety: .review,
+            action: .command(executable: "/usr/bin/xcrun", arguments: ["simctl", "erase", device.udid]),
+            reason: "Apps installed on this simulator and everything they saved: logins, databases, downloaded files.",
+            cost: "The apps and their data on this simulator are erased; the simulator itself stays",
+            costLevel: .dataLoss,
+            afterCleaning: "Erased with xcrun simctl erase, like Erase All Content and Settings. Run your app on it again to reinstall it.",
+            revealURL: data,
+            blockers: [.simulator],
+            lastUsed: device.lastUsed
+        )
+    }
+}
+
 struct SimulatorDevice: Sendable {
     var udid: String
     var name: String
     var isAvailable: Bool
     var runtimeIdentifier: String
+    /// "Booted" or "Shutdown".
+    var state: String? = nil
+    /// Its data folder: apps, their containers and settings.
+    var dataPath: URL? = nil
+    var lastUsed: Date? = nil
+
+    /// "com.apple.CoreSimulator.SimRuntime.iOS-27-2" → "iOS 27.2".
+    static func runtimeName(_ identifier: String) -> String {
+        let parts = (identifier.components(separatedBy: "SimRuntime.").last ?? identifier).split(separator: "-")
+        guard let platform = parts.first else { return identifier }
+        let version = parts.dropFirst().prefix { $0.allSatisfy(\.isNumber) }
+        return version.isEmpty ? String(platform) : "\(platform) \(version.joined(separator: "."))"
+    }
 }
 
 enum SimulatorDevices {
@@ -323,7 +365,10 @@ enum SimulatorDevices {
                     udid: udid,
                     name: device["name"] as? String ?? udid,
                     isAvailable: device["isAvailable"] as? Bool ?? true,
-                    runtimeIdentifier: runtime
+                    runtimeIdentifier: runtime,
+                    state: device["state"] as? String,
+                    dataPath: (device["dataPath"] as? String).map { URL(fileURLWithPath: $0) },
+                    lastUsed: (device["lastUsedAt"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
                 )
             }
         }
