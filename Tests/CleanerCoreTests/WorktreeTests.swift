@@ -344,4 +344,75 @@ import Testing
         #expect(ProjectsScanner().items(in: context).map(\.title) == ["app"])
         #expect(WorktreesScanner().items(in: context).map(\.id) == ["worktree-build:\(hotfix.path)"])
     }
+
+    // MARK: Last use and grouping
+
+    func setDate(_ date: Date, of url: URL) throws {
+        try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+    }
+
+    @Test func lastUseIgnoresTheIndexButCountsUncommittedEdits() throws {
+        let home = try TestHome()
+        let repo = try repo(in: home)
+        let wt = try worktree("old", of: repo)
+        let entry = try #require(GitWorktrees.find(in: [repo], home: home.url).first)
+        let longAgo = Date(timeIntervalSinceNow: -90 * 86_400)
+        for file in ["logs/HEAD", "HEAD", "index"] { try setDate(longAgo, of: entry.adminDir.appendingPathComponent(file)) }
+        try setDate(longAgo, of: wt)
+        #expect(abs(try #require(try info(wt, in: home).lastActivity).timeIntervalSince(longAgo)) < 2)
+
+        // A git status from an editor or git app rewrites the index: that isn't working in it.
+        try setDate(Date(), of: entry.adminDir.appendingPathComponent("index"))
+        #expect(abs(try #require(try info(wt, in: home).lastActivity).timeIntervalSince(longAgo)) < 2)
+
+        // Editing a tracked file is.
+        try Data("edited\n".utf8).write(to: wt.appendingPathComponent("src.txt"))
+        try setDate(longAgo, of: wt)
+        #expect(try #require(try info(wt, in: home).lastActivity).timeIntervalSinceNow > -60)
+    }
+
+    func item(_ title: String, repository: String, at parent: String = "dev", usedDaysAgo days: Double?, size: Int64 = 5_000_000) -> CleanupItem {
+        let gitDir = URL(fileURLWithPath: "/u/\(parent)/\(repository)/.git")
+        let info = WorktreeInfo(path: URL(fileURLWithPath: "/u/\(parent)/\(repository)/.claude/worktrees/\(title)"), gitDir: gitDir,
+                                repositoryName: repository, head: "0c2d7606e742")
+        return CleanupItem(id: "worktree:\(parent)/\(repository)/\(title)", title: title, size: size, safety: .safe,
+                           action: .removePaths([info.path]), lastUsed: days.map { Date(timeIntervalSinceNow: -$0 * 86_400) },
+                           worktree: info)
+    }
+
+    @Test func worktreesAndProjectsAreListedLongestUnusedFirst() {
+        let items = [
+            item("recent", repository: "app", usedDaysAgo: 1, size: 9_000_000_000),
+            item("undated", repository: "app", usedDaysAgo: nil, size: 8_000_000_000),
+            item("old", repository: "app", usedDaysAgo: 200, size: 2_000_000),
+            item("middle", repository: "app", usedDaysAgo: 30),
+        ]
+        #expect(ScanEngine.category(for: WorktreesScanner(), items: items).items.map(\.title) == ["old", "middle", "recent", "undated"])
+        #expect(ProjectsScanner().sortsByLastUsed)
+        // Everything else stays biggest first.
+        #expect(ScanEngine.category(for: XcodeScanner(), items: items).items.map(\.title) == ["recent", "undated", "middle", "old"])
+    }
+
+    @Test func worktreesAreGroupedByRepositoryLongestUnusedFirst() throws {
+        let items = [
+            item("a1", repository: "app", usedDaysAgo: 3),
+            item("g1", repository: "game", usedDaysAgo: 100),
+            item("a2", repository: "app", usedDaysAgo: 40),
+            item("g2", repository: "game", usedDaysAgo: 60),
+            item("t1", repository: "app", at: "tools", usedDaysAgo: 10),
+        ]
+        let category = ScanEngine.category(for: WorktreesScanner(), items: items)
+        let groups = try #require(category.worktreeGroups)
+        // game's newest worktree was used 60 days ago, the other two repositories' more recently.
+        #expect(groups.map(\.repositoryName) == ["game", "app (tools)", "app (dev)"])
+        #expect(groups[0].items.map(\.title) == ["g1", "g2"])
+        #expect(groups[2].items.map(\.title) == ["a2", "a1"])
+        #expect(groups[0].size == 10_000_000)
+        #expect(abs(try #require(groups[0].lastUsed).timeIntervalSinceNow + 60 * 86_400) < 5)
+
+        // Only worktrees are grouped.
+        var mixed = category
+        mixed.items.append(CleanupItem(id: "other", title: "other", size: 1, safety: .safe, action: .removePaths([])))
+        #expect(mixed.worktreeGroups == nil)
+    }
 }

@@ -162,7 +162,16 @@ A merged worktree is only Safe when nothing else is lost with it either. It's Re
 - **Something has it open right now**: a terminal, a Claude Code session, an editor, a running build (one
   `lsof -n -P` pass over your processes, a fraction of a second). The `adb` server, which keeps the folder it
   was started from until you restart, doesn't count.
-- **It was used in the last 2 days**, since a session or editor may still come back to it.
+- **It was used in the last 2 days**, since a session or editor may still come back to it. "Used" means its
+  last commit or checkout, or the latest edit to a file that's still uncommitted. Not the index: every
+  `git status` from an editor or git app rewrites it, and a Mac you just moved to would otherwise show every
+  worktree as used today.
+
+Worktrees are listed by last use, longest ago first, and each row says when ("used 3 months ago"; hover for
+the date). With worktrees of more than one repository, they're grouped by repository: each group's row shows
+how many there are, their size and when any of them was last used, its checkbox selects them all, and tapping
+it folds them away. The repository whose worktrees were all used longest ago comes first. Project build folders
+are listed by last use too.
 
 `kmmc worktrees [text]` shows all of this per worktree, for the worktrees whose path contains `text`.
 

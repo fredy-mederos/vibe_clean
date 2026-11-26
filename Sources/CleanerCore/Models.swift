@@ -194,3 +194,58 @@ public struct CleanupCategory: Identifiable, Sendable {
         }
     }
 }
+
+extension CleanupItem {
+    /// Longest unused first, so what you haven't touched in a while is at the top. Items without a date go last;
+    /// among equal dates, the biggest first.
+    public static func leastRecentlyUsedFirst(_ a: CleanupItem, _ b: CleanupItem) -> Bool {
+        switch (a.lastUsed, b.lastUsed) {
+        case let (first?, second?) where first != second: first < second
+        case (_?, nil): true
+        case (nil, _?): false
+        default: a.size > b.size
+        }
+    }
+}
+
+/// The worktrees of one repository, so they can be looked at and selected together.
+public struct WorktreeGroup: Identifiable, Sendable {
+    /// The repository's shared git folder.
+    public var id: String
+    /// The main checkout's folder name, with its parent folder when two repositories share a name.
+    public var repositoryName: String
+    /// Longest unused first.
+    public var items: [CleanupItem]
+
+    public var size: Int64 { items.reduce(0) { $0 + $1.size } }
+    /// When any of its worktrees was last used.
+    public var lastUsed: Date? { items.compactMap(\.lastUsed).max() }
+}
+
+extension CleanupCategory {
+    /// Its items by repository, the repository whose worktrees were all used longest ago first. Nil unless every
+    /// item is a worktree.
+    public var worktreeGroups: [WorktreeGroup]? {
+        guard !items.isEmpty, items.allSatisfy({ $0.worktree != nil }) else { return nil }
+        let byRepository = Dictionary(grouping: items) { $0.worktree!.gitDir.standardizedFileURL.path }
+        let nameCounts = Dictionary(byRepository.values.map { ($0[0].worktree!.repositoryName, 1) }, uniquingKeysWith: +)
+        let groups = byRepository.map { gitDir, items in
+            let info = items[0].worktree!
+            var name = info.repositoryName
+            if nameCounts[name, default: 0] > 1 {
+                // `…/parent/app/.git` → "app (parent)".
+                let checkout = info.gitDir.lastPathComponent == ".git" ? info.gitDir.deletingLastPathComponent() : info.gitDir
+                name += " (\(checkout.deletingLastPathComponent().lastPathComponent))"
+            }
+            return WorktreeGroup(id: gitDir, repositoryName: name, items: items.sorted(by: CleanupItem.leastRecentlyUsedFirst))
+        }
+        return groups.sorted { a, b in
+            switch (a.lastUsed, b.lastUsed) {
+            case let (first?, second?) where first != second: first < second
+            case (_?, nil): true
+            case (nil, _?): false
+            default: a.repositoryName.localizedStandardCompare(b.repositoryName) == .orderedAscending
+            }
+        }
+    }
+}

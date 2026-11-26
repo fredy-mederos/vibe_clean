@@ -382,8 +382,15 @@ private struct CategoryCard: View {
                     .padding(.trailing, 10)
                 InactiveRow(category: category)
                 VStack(spacing: 0) {
-                    ForEach(category.items) { item in
-                        ItemRow(item: item)
+                    // Worktrees of more than one repository are listed by repository, to clean one project's at once.
+                    if let groups = category.worktreeGroups, groups.count > 1 {
+                        ForEach(groups) { group in
+                            WorktreeGroupView(group: group)
+                        }
+                    } else {
+                        ForEach(category.items) { item in
+                            ItemRow(item: item)
+                        }
                     }
                 }
                 .padding(.vertical, 4)
@@ -433,9 +440,82 @@ private struct InactiveRow: View {
     }
 }
 
+/// One repository's worktrees under Git worktrees: a row that selects them all, then the worktrees, longest unused
+/// first. Tapping the row folds them away.
+private struct WorktreeGroupView: View {
+    @Environment(AppModel.self) private var model
+    let group: WorktreeGroup
+    @State private var isHovering = false
+
+    private var isExpanded: Bool { !model.collapsedGroups.contains(group.id) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                CheckBox(state: model.selectionState(of: group.items)) { model.toggle(group.items) }
+                    .help("Select all \(group.repositoryName) worktrees")
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(group.repositoryName)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(Palette.secondaryText)
+                        .lineLimit(1)
+                        .help(group.lastUsed.map { "Last used \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")
+                }
+                Spacer(minLength: 8)
+                Text(ByteFormat.standard(group.size))
+                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(isHovering ? 0.05 : 0))
+            }
+            .padding(.leading, 32)
+            .padding(.trailing, 4)
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+            .onTapGesture {
+                withAnimation(.snappy(duration: 0.2)) { model.toggleCollapsed(group) }
+            }
+
+            if isExpanded {
+                ForEach(group.items) { item in
+                    ItemRow(item: item, indent: 52, showsRepository: false)
+                }
+            }
+        }
+    }
+
+    /// "3 worktrees · last used 2 weeks ago".
+    private var subtitle: String {
+        var parts = [group.items.count == 1 ? "1 worktree" : "\(group.items.count) worktrees"]
+        if let lastUsed = group.lastUsed {
+            parts.append("last used \(lastUsed.formatted(.relative(presentation: .named)))")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
 private struct ItemRow: View {
     @Environment(AppModel.self) private var model
     let item: CleanupItem
+    /// How far the row is from the card's edge: further in under a repository's worktrees.
+    var indent: CGFloat = 32
+    /// Whether the worktree line names the repository; not under a row that already does.
+    var showsRepository = true
     @State private var isHovering = false
     @State private var showsInfo = false
 
@@ -455,6 +535,7 @@ private struct ItemRow: View {
                         .foregroundStyle(Palette.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .help(item.lastUsed.map { "\(item.dateKind.label.capitalized) \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")
                 }
                 costLine
                 suggestionLine
@@ -481,7 +562,7 @@ private struct ItemRow: View {
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(isHovering ? 0.05 : 0))
         }
-        .padding(.leading, 32)
+        .padding(.leading, indent)
         .padding(.trailing, 4)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
@@ -550,7 +631,7 @@ private struct ItemRow: View {
     private var worktreeLine: some View {
         if let worktree = item.worktree {
             let at = worktree.branch ?? "detached at \(worktree.head.prefix(7))"
-            let parts = [worktree.repositoryName, at == item.title ? nil : at, worktree.tool].compactMap { $0 }
+            let parts = [showsRepository ? worktree.repositoryName : nil, at == item.title ? nil : at, worktree.tool].compactMap { $0 }
             Label {
                 Text(parts.joined(separator: " · "))
             } icon: {

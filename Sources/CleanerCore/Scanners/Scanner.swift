@@ -60,6 +60,13 @@ public protocol CleanupScanner: Sendable {
     var symbol: String { get }
     /// Lists what to measure. Keep this quick; heavy work belongs inside the probes.
     func probes(in context: ScanContext) -> [ItemProbe]
+    /// Lists items by when you last used them, longest ago first, instead of biggest first. For things you decide
+    /// on by how long you haven't touched them, like projects and worktrees.
+    var sortsByLastUsed: Bool { get }
+}
+
+extension CleanupScanner {
+    public var sortsByLastUsed: Bool { false }
 }
 
 extension CleanupScanner {
@@ -70,7 +77,8 @@ extension CleanupScanner {
 }
 
 public struct ScanSnapshot: Sendable {
-    /// Categories with at least one item, in scanner order, items sorted by size.
+    /// Categories with at least one item, in scanner order, items sorted by size (or by last use, for projects and
+    /// worktrees).
     public var categories: [CleanupCategory]
     /// Measurements still running.
     public var pending: Int
@@ -171,12 +179,14 @@ public enum ScanEngine {
     static func category(for scanner: any CleanupScanner, items: [CleanupItem]) -> CleanupCategory {
         // Two probes can find the same thing; keep the first so IDs stay unique.
         var seen = Set<String>()
-        let unique = items.filter { seen.insert($0.id).inserted }
+        let unique = items.filter { seen.insert($0.id).inserted }.filter { $0.size >= minimumItemSize }
         return CleanupCategory(
             id: scanner.categoryID,
             title: scanner.title,
             symbol: scanner.symbol,
-            items: unique.filter { $0.size >= minimumItemSize }.sorted { $0.size > $1.size }
+            items: scanner.sortsByLastUsed
+                ? unique.sorted(by: CleanupItem.leastRecentlyUsedFirst)
+                : unique.sorted { $0.size > $1.size }
         )
     }
 }
