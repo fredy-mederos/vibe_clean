@@ -13,6 +13,9 @@ public struct ProjectsScanner: CleanupScanner {
 
     public init() {}
 
+    /// Listed by last use, so the projects you haven't touched in a while come first.
+    public var sortsByLastUsed: Bool { true }
+
     /// Folders that come back through a package install rather than a local build.
     static let downloadedArtifacts: Set<String> = [
         "node_modules", "Pods", ".dart_tool", "bundle", "packages", "deps", ".venv", "venv",

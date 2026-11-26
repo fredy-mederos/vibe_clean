@@ -113,15 +113,29 @@ case "worktrees":
     let filter = arguments.dropFirst().first
     let entries = GitWorktrees.find(in: ProjectDiscovery.projects(inLocations: locations()), home: home)
         .filter { entry in filter.map { entry.path.path.contains($0) } ?? true }
-    for (gitDir, group) in Dictionary(grouping: entries, by: \.gitDir).sorted(by: { $0.key.path < $1.key.path }) {
-        print("== \(PathFormat.abbreviated(gitDir)) (\(group.count == 1 ? "1 worktree" : "\(group.count) worktrees"))")
-        for entry in group.sorted(by: { $0.path.path < $1.path.path }) {
+    // Repositories whose worktrees were all used longest ago first, and in each, the longest unused worktree first.
+    struct Checked { var entry: GitWorktrees.Entry; var info: WorktreeInfo?; var seconds: TimeInterval }
+    let checked = Dictionary(grouping: entries, by: \.gitDir).map { gitDir, group in
+        (gitDir, group.map { entry in
+            let start = Date()
+            let info = (try? PathGuard.validate(entry.path, home: home)) == nil ? nil : GitWorktrees.inspect(entry)
+            return Checked(entry: entry, info: info, seconds: Date().timeIntervalSince(start))
+        }.sorted { ($0.info?.lastActivity ?? .distantFuture) < ($1.info?.lastActivity ?? .distantFuture) })
+    }.sorted { a, b in
+        let first = a.1.compactMap(\.info?.lastActivity).max() ?? .distantFuture
+        let second = b.1.compactMap(\.info?.lastActivity).max() ?? .distantFuture
+        return first != second ? first < second : a.0.path < b.0.path
+    }
+    for (gitDir, group) in checked {
+        let lastUsed = group.compactMap(\.info?.lastActivity).max().map { ", last used \($0.formatted(.relative(presentation: .named)))" } ?? ""
+        print("== \(PathFormat.abbreviated(gitDir)) (\(group.count == 1 ? "1 worktree" : "\(group.count) worktrees")\(lastUsed))")
+        for item in group {
+            let entry = item.entry
             guard (try? PathGuard.validate(entry.path, home: home)) != nil else {
                 print("   \(PathFormat.abbreviated(entry.path)): outside your home folder, not offered")
                 continue
             }
-            let start = Date()
-            guard let info = GitWorktrees.inspect(entry) else {
+            guard let info = item.info else {
                 print("   \(PathFormat.abbreviated(entry.path)): git couldn't read it")
                 continue
             }
@@ -131,8 +145,9 @@ case "worktrees":
                 let what = item.action.removesWorktree ? "remove worktree" : "build folders"
                 return "\(what) \(ByteFormat.standard(item.size))\(item.safety == .review ? " [review]" : "")"
             } ?? "nothing to clean"
-            print("   \(info.name)  \(state)  → \(offer)")
-            print("      \(PathFormat.abbreviated(entry.path))  (checked in \(String(format: "%.1f", Date().timeIntervalSince(start)))s)")
+            let used = info.lastActivity.map { "used \($0.formatted(.relative(presentation: .named)))  " } ?? ""
+            print("   \(info.name)  \(used)\(state)  → \(offer)")
+            print("      \(PathFormat.abbreviated(entry.path))  (checked in \(String(format: "%.1f", item.seconds))s)")
             if !openBy.isEmpty { print("      open in \(openBy.joined(separator: ", "))") }
             if let own = info.ownIgnoredFiles, !own.isEmpty {
                 print("      \(own.count) ignored files only it has: \(own.prefix(3).joined(separator: ", "))\(own.count > 3 ? ", …" : "")")

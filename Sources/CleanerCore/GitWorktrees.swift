@@ -35,7 +35,7 @@ public struct WorktreeInfo: Sendable, Hashable {
     public var uncommitted: [String] = []
     public var isLocked = false
     public var hasSubmodules = false
-    /// Last git activity in it: commits, checkouts, staging.
+    /// When it was last worked in: commits and checkouts, or editing a file that's still uncommitted.
     public var lastActivity: Date?
     /// Files git ignores that only this worktree has, biggest first: not build outputs or editor state, and not
     /// copies of the main checkout's files. Removing the worktree deletes them. Only checked for merged worktrees;
@@ -261,8 +261,7 @@ public enum GitWorktrees {
         info.uncommitted = uncommitted
         info.isLocked = FileInfo.exists(entry.adminDir.appendingPathComponent("locked"))
         info.hasSubmodules = FileInfo.exists(entry.path.appendingPathComponent(".gitmodules"))
-        let activity = ["logs/HEAD", "HEAD", "index"].map { entry.adminDir.appendingPathComponent($0) } + [entry.path]
-        info.lastActivity = activity.compactMap(FileInfo.modificationDate).max()
+        info.lastActivity = lastActivity(of: entry, uncommitted: uncommitted)
 
         let bases = baseBranches(in: entry.path)
         info.base = bases.first.map(shortName)
@@ -281,6 +280,16 @@ public enum GitWorktrees {
             info.ownIgnoredFiles = ownIgnoredFiles(in: entry.path, mainCheckout: mainCheckout)
         }
         return info
+    }
+
+    /// When a worktree was last worked in: its last commit or checkout, the folder's own date (files added or
+    /// removed at the top), or the latest edit to a file that's still uncommitted. Not the index: every
+    /// `git status` from an editor or git app rewrites it, so it says when something last looked, not when you worked.
+    static func lastActivity(of entry: Entry, uncommitted: [String]) -> Date? {
+        let gitFiles = ["logs/HEAD", "HEAD"].map { entry.adminDir.appendingPathComponent($0) }
+        // Untracked folders are listed as "folder/"; their own date is enough.
+        let edited = uncommitted.prefix(200).map { entry.path.appendingPathComponent($0) }
+        return (gitFiles + [entry.path] + edited).compactMap(FileInfo.modificationDate).max()
     }
 
     /// The repository's main branches as full ref names, best first: origin's default branch, then main, master,

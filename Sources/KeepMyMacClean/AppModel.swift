@@ -27,6 +27,8 @@ final class AppModel {
     private(set) var history: SpaceHistory
     var selection: Set<String> = []
     var expanded: Set<String> = []
+    /// Repositories whose worktrees are folded away under Git worktrees. They start unfolded.
+    var collapsedGroups: Set<String> = []
     /// Show only one kind of item (safe, review, your files). Nil shows everything.
     var filter: Safety?
     var phase: CleanPhase = .idle
@@ -283,14 +285,24 @@ final class AppModel {
     }
 
     func selectionState(of category: CleanupCategory) -> CheckState {
-        let selected = category.items.filter { selection.contains($0.id) }.count
-        if selected == 0 { return .off }
-        return selected == category.items.count ? .on : .mixed
+        selectionState(of: category.items)
     }
 
     func toggle(_ category: CleanupCategory) {
-        let ids = category.items.map(\.id)
-        if selectionState(of: category) == .on {
+        toggle(category.items)
+    }
+
+    /// Whether none, some or all of `items` are selected, as for a category or a repository's worktrees.
+    func selectionState(of items: [CleanupItem]) -> CheckState {
+        let selected = items.filter { selection.contains($0.id) }.count
+        if selected == 0 { return .off }
+        return selected == items.count ? .on : .mixed
+    }
+
+    /// Selects all of `items`, or clears them when they're all selected already.
+    func toggle(_ items: [CleanupItem]) {
+        let ids = items.map(\.id)
+        if selectionState(of: items) == .on {
             selection.subtract(ids)
         } else {
             selection.formUnion(ids)
@@ -315,6 +327,10 @@ final class AppModel {
 
     func toggleExpanded(_ category: CleanupCategory) {
         if expanded.contains(category.id) { expanded.remove(category.id) } else { expanded.insert(category.id) }
+    }
+
+    func toggleCollapsed(_ group: WorktreeGroup) {
+        if collapsedGroups.contains(group.id) { collapsedGroups.remove(group.id) } else { collapsedGroups.insert(group.id) }
     }
 
     // MARK: Cleaning

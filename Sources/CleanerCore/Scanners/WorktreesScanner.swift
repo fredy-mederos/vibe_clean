@@ -12,6 +12,8 @@ public struct WorktreesScanner: CleanupScanner {
     public let categoryID = "worktrees"
     public let title = "Git worktrees"
     public let symbol = "arrow.triangle.branch"
+    /// Listed by last use, so the ones you haven't touched in a while come first.
+    public var sortsByLastUsed: Bool { true }
 
     /// A merged worktree used more recently than this may still be open in a session or editor, so it's Review.
     let inUseWithin: TimeInterval
